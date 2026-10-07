@@ -1,0 +1,22 @@
+{
+  "name": "seedance-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "test": "node --experimental-strip-types --test genjutsu.test.mjs account.test.mjs",
+    "test:integration": "node --import tsx integration.test.mjs",
+    "start": "tsx index.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@higgsfield/client": "^0.2.6",
+    "dotenv": "^18.0.6"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

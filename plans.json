@@ -1,0 +1,5 @@
+[
+  { "id": "starter", "name": "Starter", "credits": 350, "price": 49, "checkoutUrl": null },
+  { "id": "pro", "name": "Pro", "credits": 1500, "price": 197, "checkoutUrl": null },
+  { "id": "scale", "name": "Scale", "credits": 5500, "price": 697, "checkoutUrl": null }
+]
