@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 const directory = process.env.FRAMME_TEST_DATA_DIR ? pathToFileURL(process.env.FRAMME_TEST_DATA_DIR + "/") : new URL(".data/", import.meta.url);
 export class AccountError extends Error {}
 const path = new URL("account.json", directory);
-type Account = { name: string; avatar: string; salt?: string; hash?: string };
+type Account = { name: string; avatar: string; email?: string; salt?: string; hash?: string };
 let account: Account = { name: "Minha conta", avatar: "" };
 try { account = JSON.parse(await readFile(path, "utf8")); } catch (error) {
   if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Não foi possível carregar a conta local.");
@@ -33,9 +33,9 @@ function passwordMatches(value: unknown) {
   return timingSafeEqual(scryptSync(value, account.salt, 64), Buffer.from(account.hash, "hex"));
 }
 let failures = 0, lockedUntil = 0;
-export function login(password: unknown, res: ServerResponse) {
+export function login(password: unknown, res: ServerResponse, email?: unknown) {
   if (Date.now() < lockedUntil) throw new Error("Aguarde um minuto antes de tentar novamente.");
-  if (!passwordMatches(password)) {
+  if (!passwordMatches(password) || (account.email && (typeof email !== 'string' || email.trim().toLowerCase() !== account.email))) {
     if (++failures >= 5) { lockedUntil = Date.now() + 60000; failures = 0; }
     throw new Error("Senha incorreta.");
   }
@@ -48,12 +48,16 @@ export async function updateAccount(data: Record<string, unknown>, res: ServerRe
     const next = { ...account };
     if (typeof data.name !== "string" || !data.name.trim() || data.name.trim().length > 80) throw new AccountError("Use um nome de 1 a 80 caracteres.");
     next.name = data.name.trim();
+    if (!account.hash && data.email !== undefined) {
+      if(typeof data.email !== 'string' || data.email.length>254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) throw new AccountError('Informe um e-mail válido.');
+      next.email=data.email.trim().toLowerCase();
+    }
     if (typeof data.avatar !== "string" || data.avatar.length > 2800000 || (data.avatar && !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(data.avatar))) throw new AccountError("Use uma foto JPG, PNG ou WebP de até 2 MiB.");
     next.avatar = data.avatar;
     let passwordChanged = false;
     if (data.newPassword) {
       if (account.hash && !passwordMatches(data.currentPassword)) throw new AccountError("A senha atual está incorreta.");
-      if (typeof data.newPassword !== "string" || data.newPassword.length < 12 || data.newPassword.length > 256) throw new AccountError("A nova senha deve ter entre 12 e 256 caracteres.");
+      if (typeof data.newPassword !== "string" || data.newPassword.length < 8 || data.newPassword.length > 256) throw new AccountError("A nova senha deve ter entre 8 e 256 caracteres.");
       next.salt = randomBytes(32).toString("hex");
       next.hash = scryptSync(data.newPassword, next.salt, 64).toString("hex");
       passwordChanged = true;

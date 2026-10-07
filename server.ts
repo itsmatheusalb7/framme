@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -20,11 +21,23 @@ const jobPath = new URL("job.json", dataDirectory);
 try { current = JSON.parse(await readFile(jobPath, "utf8")); } catch (error) {
   if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Não foi possível carregar o pedido salvo.");
 }
+const historyPath = new URL('history.json', dataDirectory);
+let history: Job[] = [];
+try { history = JSON.parse(await readFile(historyPath, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw Error('Não foi possível carregar o histórico.'); }
+async function saveHistory() {
+  const completed = (current?.items ?? (current ? [current] : [])).filter(item => item.status === 'completed' && item.url);
+  for (const item of completed) if (!history.some(saved => saved.id === item.id)) history.unshift({ id:item.id, status:'completed', mode:item.mode, url:item.url, message:'', completedAt:item.completedAt ?? current?.completedAt ?? Date.now() });
+  await mkdir(dataDirectory, { recursive:true });
+  await writeFile(new URL('history.tmp',dataDirectory), JSON.stringify(history));
+  await rename(new URL('history.tmp',dataDirectory), historyPath);
+}
+await saveHistory();
 async function saveJob() {
   await mkdir(dataDirectory, { recursive: true });
   const temp = new URL("job.tmp", dataDirectory);
   await writeFile(temp, JSON.stringify(current));
   await rename(temp, jobPath);
+  await saveHistory();
 }
 const uploadedUrls = new Set<string>();
 const uploadedDurations = new Map<string, number>();
@@ -139,21 +152,44 @@ if (current?.status === "running") {
 createServer(async (req, res) => {
   try {
     if (req.headers.host !== `127.0.0.1:${port}`) return json(res, 403, { error: "Host inválido." });
-    if (req.method === "GET" && ["/panel.css", "/panel.js", "/profile.js", "/profile.css"].includes(req.url ?? "")) {
+    if ((req.method === 'GET' || req.method === 'HEAD') && req.url === '/video-login.mp4') {
+      const path = new URL('video-login.mp4', import.meta.url), size = (await stat(path)).size;
+      const range = req.headers.range;
+      let start = 0, end = size - 1;
+      if(range){
+        const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+        if(!match || (!match[1]&&!match[2])){res.writeHead(416,{'Content-Range':`bytes */${size}`});return res.end();}
+        start=match[1]?Number(match[1]):Math.max(0,size-Number(match[2]));
+        end=match[1]&&match[2]?Math.min(Number(match[2]),size-1):size-1;
+        if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>end||start>=size){res.writeHead(416,{'Content-Range':`bytes */${size}`});return res.end();}
+      }
+      res.writeHead(range?206:200,{'Content-Type':'video/mp4','Accept-Ranges':'bytes','Content-Length':end-start+1,...(range?{'Content-Range':`bytes ${start}-${end}/${size}`}:{})});
+      if(req.method==='HEAD')return res.end();
+      const stream=createReadStream(path,{start,end});stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());return stream.pipe(res);
+    }
+    if (req.method === "GET" && ["/panel.css", "/panel.js", "/profile.js", "/profile.css", "/login.css", "/login.js"].includes(req.url ?? "")) {
       res.writeHead(200, { "Content-Type": req.url?.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
       return res.end(await readFile(new URL(`.${req.url}`, import.meta.url)));
     }
-    if (req.method === "GET" && ["/", "/profile"].includes(req.url ?? "")) {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src https: blob:; img-src 'self' https: blob: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'", "Referrer-Policy": "no-referrer" });
-      return res.end(await readFile(new URL(req.url === "/profile" ? "profile.html" : "panel.html", import.meta.url)));
+    if (req.method === "GET" && ["/", "/profile", "/login", "/register"].includes(req.url ?? "")) {
+      if(!['/login','/register'].includes(req.url ?? '') && (!publicAccount().hasPassword || !authorized(req))){res.writeHead(302,{Location:'/login'});return res.end();}
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src 'self' https: blob:; img-src 'self' https: blob: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'", "Referrer-Policy": "no-referrer" });
+      return res.end(await readFile(new URL(['/login','/register'].includes(req.url ?? '') ? 'login.html' : req.url === "/profile" ? "profile.html" : "panel.html", import.meta.url)));
     }
     if (req.method === "POST" && req.headers.origin !== origin) return json(res, 403, { error: "Origem inválida." });
     if (req.method === "POST" && req.url === "/api/login") {
-      try { const data = JSON.parse((await bytes(req, 4096)).toString()); login(data.password, res); return json(res, 200, { ok: true }); }
+      try { const data = JSON.parse((await bytes(req, 4096)).toString()); login(data.password, res, data.email); return json(res, 200, { ok: true }); }
       catch { return json(res, 401, { error: "Senha incorreta ou tentativas excedidas. Aguarde um minuto se necessário." }); }
     }
-    if (!authorized(req)) return json(res, 401, { error: "Entre na sua conta para continuar." });
+    if(req.method==='GET' && req.url==='/api/access')return json(res,200,{setup:!publicAccount().hasPassword});
+    if(req.method==='POST' && req.url==='/api/setup'){
+      if(publicAccount().hasPassword)return json(res,409,{error:'A conta já foi configurada. Entre com sua senha.'});
+      try{const data=JSON.parse((await bytes(req,4096)).toString());if(typeof data.password!=='string'||data.password.length<8)throw new AccountError('Use uma senha com pelo menos 8 caracteres.');await updateAccount({name:data.name,avatar:publicAccount().avatar,email:data.email,newPassword:data.password},res);return json(res,200,{ok:true});}
+      catch(error){return json(res,400,{error:error instanceof AccountError?error.message:'Não foi possível configurar o acesso.'});}
+    }
+    if (!publicAccount().hasPassword || !authorized(req)) return json(res, 401, { error: "Entre na sua conta para continuar." });
     if (req.method === "GET" && req.url === "/api/profile") return json(res, 200, publicAccount());
+    if (req.method === 'GET' && req.url === '/api/history') return json(res, 200, { items:history });
     if (req.method === "GET" && req.url === "/api/plans") {
       const plans = JSON.parse(await readFile(new URL("plans.json", import.meta.url), "utf8"));
       return json(res, 200, { plans });
@@ -164,7 +200,8 @@ createServer(async (req, res) => {
     }
     if (req.method === "GET" && new URL(req.url ?? "/", origin).pathname === "/api/download") {
       const index = Number(new URL(req.url!, origin).searchParams.get("index") ?? 0);
-      const selected = current?.items ? current.items[index] : index === 0 ? current : null;
+      const historyId = new URL(req.url!, origin).searchParams.get('history');
+      const selected = historyId ? history.find(item => item.id === historyId) : current?.items ? current.items[index] : index === 0 ? current : null;
       if (!Number.isInteger(index) || selected?.status !== "completed" || !selected.url) return json(res, 404, { error: "Nenhum vídeo concluído." });
       const response = await fetch(selected.url, { signal: AbortSignal.timeout(300000), redirect: "error" });
       if (!response.ok || !response.body) return json(res, 502, { error: "Vídeo indisponível para download." });
